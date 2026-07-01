@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Passada — Análise de Corrida</title>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.js" crossorigin="anonymous"></script>
+<style>
+  :root {
+    --bg: #0a0e0f; --panel: #12181a; --panel2:#0e1416; --line: #1f2a2d;
+    --ink: #e8efe9; --mute: #6d7d78; --signal: #6ee7a8; --warn: #ff6b5e; --amber: #ffb454;
+    --mono: 'SF Mono', ui-monospace, 'Roboto Mono', Menlo, Consolas, monospace;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+    min-height:100%; overscroll-behavior:none; }
+  #app { display:flex; flex-direction:column; min-height:100dvh; max-width:520px; margin:0 auto; }
+
+  header { padding:14px 18px 10px; display:flex; align-items:baseline; justify-content:space-between;
+    border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--bg); z-index:10; }
+  .brand { font-weight:700; letter-spacing:-0.03em; font-size:19px; }
+  .brand span { color:var(--signal); }
+  .tagline { font-family:var(--mono); font-size:10px; color:var(--mute); letter-spacing:0.08em; text-transform:uppercase; }
+
+  .screen { flex:1; display:none; flex-direction:column; }
+  .screen.active { display:flex; }
+
+  /* ---------- UPLOAD ---------- */
+  .upload-wrap { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:32px 24px; text-align:center; }
+  .drop {
+    width:100%; border:1.5px dashed var(--line); border-radius:18px; padding:40px 24px;
+    display:flex; flex-direction:column; align-items:center; gap:16px; cursor:pointer; transition:border-color .2s, background .2s;
+  }
+  .drop:active { border-color:var(--signal); background:var(--panel2); }
+  .drop .icon { width:60px; height:60px; border:1.5px solid var(--line); border-radius:50%;
+    display:flex; align-items:center; justify-content:center; color:var(--signal); font-size:26px; }
+  .drop h2 { font-size:18px; font-weight:600; letter-spacing:-0.02em; }
+  .drop p { font-size:13px; color:var(--mute); line-height:1.5; max-width:300px; }
+  .checklist { margin-top:28px; width:100%; text-align:left; }
+  .checklist .ct { font-family:var(--mono); font-size:10px; color:var(--mute); letter-spacing:0.08em; text-transform:uppercase; margin-bottom:10px; }
+  .checklist li { list-style:none; font-size:13px; color:var(--ink); padding:6px 0; display:flex; gap:10px; align-items:flex-start; }
+  .checklist li::before { content:'→'; color:var(--signal); flex:0 0 auto; }
+  input[type=file] { display:none; }
+
+  /* ---------- PROCESSING ---------- */
+  .proc { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:32px; gap:20px; }
+  .proc video { width:100%; border-radius:14px; display:none; }
+  .ring { width:64px; height:64px; border:3px solid var(--line); border-top-color:var(--signal); border-radius:50%; animation:spin 0.9s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .proc h3 { font-size:16px; font-weight:600; }
+  .proc .sub { font-family:var(--mono); font-size:11px; color:var(--mute); letter-spacing:0.05em; }
+  .bar { width:100%; height:4px; background:var(--line); border-radius:2px; overflow:hidden; }
+  .bar > i { display:block; height:100%; width:0%; background:var(--signal); transition:width .2s; }
+
+  /* hidden analysis canvas */
+  .analysis-view { position:relative; width:100%; border-radius:14px; overflow:hidden; background:#000; }
+  .analysis-view video, .analysis-view canvas { width:100%; display:block; }
+  .analysis-view canvas { position:absolute; top:0; left:0; }
+
+  /* ---------- REPORT ---------- */
+  .report { flex:1; padding:20px 16px 32px; }
+  .rep-head { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:6px; }
+  .rep-head h2 { font-size:20px; letter-spacing:-0.03em; }
+  .rep-date { font-family:var(--mono); font-size:10px; color:var(--mute); text-align:right; letter-spacing:0.05em; }
+  .score-hero { background:linear-gradient(160deg,var(--panel),var(--panel2)); border:1px solid var(--line);
+    border-radius:16px; padding:22px; margin:16px 0; display:flex; align-items:center; gap:20px; }
+  .score-num { font-family:var(--mono); font-size:48px; font-weight:700; line-height:1; letter-spacing:-0.03em; }
+  .score-meta .st { font-size:14px; font-weight:600; margin-bottom:4px; }
+  .score-meta .sd { font-size:12px; color:var(--mute); line-height:1.5; }
+
+  .metrics { display:grid; grid-template-columns:repeat(2,1fr); gap:1px; background:var(--line);
+    border:1px solid var(--line); border-radius:14px; overflow:hidden; margin-bottom:20px; }
+  .metric { background:var(--panel); padding:14px; }
+  .metric .top { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px; }
+  .metric .label { font-family:var(--mono); font-size:9px; color:var(--mute); letter-spacing:0.08em; text-transform:uppercase; }
+  .metric .tag { font-family:var(--mono); font-size:9px; padding:2px 6px; border-radius:4px; letter-spacing:0.04em; }
+  .metric .tag.good { color:var(--signal); background:rgba(110,231,168,0.12); }
+  .metric .tag.mid { color:var(--amber); background:rgba(255,180,84,0.12); }
+  .metric .tag.warn { color:var(--warn); background:rgba(255,107,94,0.12); }
+  .metric .val { font-family:var(--mono); font-size:26px; font-weight:600; letter-spacing:-0.02em; }
+  .metric .val .u { font-size:12px; color:var(--mute); font-weight:400; }
+  .metric .ref { font-size:10px; color:var(--mute); margin-top:4px; }
+
+  .findings { margin-bottom:20px; }
+  .findings .ct { font-family:var(--mono); font-size:10px; color:var(--mute); letter-spacing:0.08em; text-transform:uppercase; margin-bottom:12px; }
+  .finding { display:flex; gap:12px; padding:12px 0; border-bottom:1px solid var(--line); }
+  .finding:last-child { border-bottom:none; }
+  .finding .fi { flex:0 0 auto; width:26px; height:26px; border-radius:8px; display:flex; align-items:center; justify-content:center; font-size:13px; }
+  .finding .fi.good { background:rgba(110,231,168,0.12); color:var(--signal); }
+  .finding .fi.warn { background:rgba(255,107,94,0.12); color:var(--warn); }
+  .finding .fi.mid { background:rgba(255,180,84,0.12); color:var(--amber); }
+  .finding .ftext { font-size:13px; line-height:1.5; }
+  .finding .ftext b { font-weight:600; }
+  .finding .ftext .cue { color:var(--mute); display:block; margin-top:2px; }
+
+  .brandline { text-align:center; font-family:var(--mono); font-size:10px; color:var(--mute);
+    letter-spacing:0.05em; margin:24px 0 12px; }
+  .brandline b { color:var(--signal); }
+
+  .controls { display:flex; gap:10px; padding:0 16px 24px; }
+  button { flex:1; font-family:inherit; font-size:15px; font-weight:600; letter-spacing:-0.01em;
+    padding:15px; border-radius:12px; border:none; cursor:pointer; transition:transform .08s; }
+  button:active { transform:scale(0.98); }
+  .btn-primary { background:var(--signal); color:#05100a; }
+  .btn-ghost { background:transparent; color:var(--ink); border:1px solid var(--line); }
+
+  .disclaimer { font-size:10px; color:var(--mute); text-align:center; line-height:1.5; padding:0 24px 20px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="brand">passa<span>da</span></div>
+    <div class="tagline">Análise de corrida · v0.2</div>
+  </header>
+
+  <!-- SCREEN 1: UPLOAD -->
+  <div class="screen active" id="s-upload">
+    <div class="upload-wrap">
+      <label class="drop" for="fileInput">
+        <div class="icon">↑</div>
+        <h2>Enviar vídeo do corredor</h2>
+        <p>Grave o atleta correndo de perfil e envie o vídeo aqui. A análise roda no seu aparelho.</p>
+      </label>
+      <input type="file" id="fileInput" accept="video/*">
+      <div class="checklist">
+        <div class="ct">Para a melhor análise</div>
+        <ul>
+          <li>Filme de <b>lado</b> (perfil), câmera na altura do quadril</li>
+          <li>Corpo inteiro no quadro, 5–10 segundos correndo</li>
+          <li>Fundo limpo e boa luz; shorts curto ajuda</li>
+          <li>Celular parado — apoie ou use tripé</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- SCREEN 2: PROCESSING -->
+  <div class="screen" id="s-proc">
+    <div class="proc">
+      <div class="analysis-view" id="analysisView" style="display:none">
+        <video id="video" playsinline muted></video>
+        <canvas id="canvas"></canvas>
+      </div>
+      <div class="ring" id="ring"></div>
+      <h3 id="procTitle">Preparando análise…</h3>
+      <div class="sub" id="procSub">carregando modelo de visão</div>
+      <div class="bar"><i id="procBar"></i></div>
+    </div>
+  </div>
+
+  <!-- SCREEN 3: REPORT -->
+  <div class="screen" id="s-report">
+    <div class="report">
+      <div class="rep-head">
+        <h2>Laudo da passada</h2>
+        <div class="rep-date" id="repDate"></div>
+      </div>
+
+      <div class="score-hero">
+        <div class="score-num" id="scoreNum">—</div>
+        <div class="score-meta">
+          <div class="st" id="scoreTitle">Índice técnico</div>
+          <div class="sd" id="scoreDesc">Avaliação geral da mecânica de corrida deste vídeo.</div>
+        </div>
+      </div>
+
+      <div class="metrics" id="repMetrics"></div>
+
+      <div class="findings">
+        <div class="ct">Pontos de atenção</div>
+        <div id="findingsList"></div>
+      </div>
+
+      <div class="brandline">análise por <b>passada</b> · entregue por seu treinador</div>
+    </div>
+
+    <div class="controls">
+      <button class="btn-ghost" id="againBtn">Novo vídeo</button>
+      <button class="btn-primary" id="shareBtn">Compartilhar laudo</button>
+    </div>
+    <div class="disclaimer">
+      Ferramenta de apoio à avaliação técnica. Não substitui diagnóstico clínico ou fisioterapêutico.
+    </div>
+  </div>
+</div>
+
+<script type="module">
+const { PoseLandmarker, FilesetResolver } = window;
+
+const fileInput = document.getElementById('fileInput');
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const analysisView = document.getElementById('analysisView');
+const ring = document.getElementById('ring');
+const procTitle = document.getElementById('procTitle');
+const procSub = document.getElementById('procSub');
+const procBar = document.getElementById('procBar');
+
+const screens = { upload:document.getElementById('s-upload'), proc:document.getElementById('s-proc'), report:document.getElementById('s-report') };
+function show(name){ Object.values(screens).forEach(s=>s.classList.remove('active')); screens[name].classList.add('active'); window.scrollTo(0,0); }
+
+let poseLandmarker = null;
+
+const LM = { L_SHOULDER:11,R_SHOULDER:12,L_HIP:23,R_HIP:24,L_KNEE:25,R_KNEE:26,
+  L_ANKLE:27,R_ANKLE:28,L_HEEL:29,R_HEEL:30,L_FOOT:31,R_FOOT:32 };
+const CONNECTIONS = [[11,12],[11,23],[12,24],[23,24],[23,25],[25,27],[27,29],[27,31],
+  [24,26],[26,28],[28,30],[28,32],[11,13],[13,15],[12,14],[14,16]];
+
+function angle(a,b,c){ const ab={x:a.x-b.x,y:a.y-b.y},cb={x:c.x-b.x,y:c.y-b.y};
+  const d=ab.x*cb.x+ab.y*cb.y, m=Math.hypot(ab.x,ab.y)*Math.hypot(cb.x,cb.y);
+  return m===0?0:Math.acos(Math.max(-1,Math.min(1,d/m)))*180/Math.PI; }
+
+async function loadModel(){
+  const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+  poseLandmarker = await PoseLandmarker.createFromOptions(vision,{
+    baseOptions:{ modelAssetPath:"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task", delegate:"GPU" },
+    runningMode:"VIDEO", numPoses:1, minPoseDetectionConfidence:0.5, minTrackingConfidence:0.5 });
+}
+
+// coletores
+let data;
+function resetData(){ data = { knee:[], trunk:[], over:[], strikes:[], footY:[], frames:0, detected:0 }; }
+
+fileInput.addEventListener('change', async (e)=>{
+  const file = e.target.files[0]; if(!file) return;
+  show('proc'); resetData();
+  procTitle.textContent='Preparando análise…'; procSub.textContent='carregando modelo de visão'; procBar.style.width='8%';
+  try {
+    if(!poseLandmarker) await loadModel();
+    procBar.style.width='20%';
+    const url = URL.createObjectURL(file);
+    video.src = url;
+    await new Promise(r=>{ video.onloadedmetadata=r; });
+    canvas.width=video.videoWidth; canvas.height=video.videoHeight;
+    analysisView.style.display='block'; ring.style.display='none';
+    procTitle.textContent='Analisando a passada'; procSub.textContent='rastreando articulações quadro a quadro';
+    await analyzeVideo();
+    buildReport();
+    show('report');
+  } catch(err){ console.error(err); procTitle.textContent='Não consegui processar esse vídeo'; procSub.textContent='tente outro arquivo ou recarregue'; ring.style.display='none'; }
+});
+
+function analyzeVideo(){
+  return new Promise((resolve)=>{
+    video.pause(); video.currentTime=0;
+    const dur = video.duration || 8;
+    const step = 1/15; // ~15fps de amostragem
+    let t = 0;
+    function seekNext(){ if(t>=dur){ resolve(); return; } video.currentTime=t; }
+    video.onseeked = ()=>{
+      const res = poseLandmarker.detectForVideo(video, t*1000);
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      data.frames++;
+      if(res.landmarks && res.landmarks.length){ data.detected++; const lm=res.landmarks[0]; drawSkeleton(lm); collect(lm,t*1000); }
+      procBar.style.width = Math.min(95, 20 + (t/dur)*75) + '%';
+      t += step; seekNext();
+    };
+    seekNext();
+  });
+}
+
+function drawSkeleton(lm){
+  const W=canvas.width,H=canvas.height;
+  ctx.lineWidth=Math.max(2,W/320); ctx.strokeStyle='rgba(110,231,168,0.7)';
+  CONNECTIONS.forEach(([a,b])=>{ if(lm[a]&&lm[b]&&lm[a].visibility>0.4&&lm[b].visibility>0.4){
+    ctx.beginPath(); ctx.moveTo(lm[a].x*W,lm[a].y*H); ctx.lineTo(lm[b].x*W,lm[b].y*H); ctx.stroke(); } });
+  lm.forEach((p,i)=>{ if(p.visibility>0.5){ const key=[23,24,25,26,27,28].includes(i);
+    ctx.beginPath(); ctx.arc(p.x*W,p.y*H,key?Math.max(4,W/180):Math.max(3,W/260),0,Math.PI*2);
+    ctx.fillStyle=key?'#ffb454':'#6ee7a8'; ctx.fill(); } });
+}
+
+function collect(lm,tms){
+  const useRight=(lm[LM.R_KNEE].visibility||0)>=(lm[LM.L_KNEE].visibility||0);
+  const hip=lm[useRight?LM.R_HIP:LM.L_HIP], knee=lm[useRight?LM.R_KNEE:LM.L_KNEE],
+        ankle=lm[useRight?LM.R_ANKLE:LM.L_ANKLE], sh=lm[useRight?LM.R_SHOULDER:LM.L_SHOULDER];
+  data.knee.push(180-angle(hip,knee,ankle));
+  const dx=sh.x-hip.x, dy=sh.y-hip.y; data.trunk.push(Math.abs(Math.atan2(dx,-dy)*180/Math.PI));
+  data.over.push(ankle.x-hip.x);
+  data.footY.push({y:ankle.y,t:tms});
+  // detecção de contato (mínimo local do pé)
+  const n=data.footY.length;
+  if(n>=5){ const mid=data.footY[n-3];
+    if(mid.y>data.footY[n-5].y && mid.y>data.footY[n-1].y){
+      const last=data.strikes[data.strikes.length-1];
+      if(!last || (mid.t-last)>180) data.strikes.push(mid.t);
+    } }
+}
+
+function pct(arr,p){ const s=[...arr].sort((a,b)=>a-b); return s[Math.floor(s.length*p)]||0; }
+function mean(arr){ return arr.length? arr.reduce((a,b)=>a+b,0)/arr.length : 0; }
+
+function buildReport(){
+  document.getElementById('repDate').textContent = new Date().toLocaleDateString('pt-BR',{day:'2-digit',month:'short',year:'numeric'});
+
+  const kneePeak = Math.round(pct(data.knee,0.9));
+  const trunkAvg = Math.round(mean(data.trunk));
+  const overMax = Math.round(Math.max(...data.over.map(Math.abs))*300);
+
+  let cadence=null;
+  if(data.strikes.length>=3){ const sp=[]; for(let i=1;i<data.strikes.length;i++) sp.push(data.strikes[i]-data.strikes[i-1]);
+    const a=mean(sp); if(a>150&&a<800) cadence=Math.round(60000/a); }
+
+  const metrics = [
+    { label:'Cadência', val:cadence, unit:'ppm', ref:'ideal 170–185', good:[170,185], mid:[160,195], fmt:v=>v?v:'—' },
+    { label:'Flexão joelho', val:kneePeak, unit:'°', ref:'recuperação 80–110°', good:[80,110], mid:[60,130] },
+    { label:'Inclinação tronco', val:trunkAvg, unit:'°', ref:'ideal 5–12°', good:[5,12], mid:[0,18] },
+    { label:'Overstride', val:overMax, unit:'', ref:'quanto menor, melhor', good:[0,25], mid:[26,45], fmt:v=> v<=25?'Baixo':v<=45?'Médio':'Alto' },
+  ];
+
+  const mEl = document.getElementById('repMetrics'); mEl.innerHTML='';
+  let goodCount=0, total=0;
+  metrics.forEach(m=>{
+    let cls='warn', tagtxt='atenção';
+    if(m.val!=null){ total++;
+      if(m.val>=m.good[0]&&m.val<=m.good[1]){ cls='good'; tagtxt='bom'; goodCount++; }
+      else if(m.val>=m.mid[0]&&m.val<=m.mid[1]){ cls='mid'; tagtxt='médio'; }
+    } else { tagtxt='s/ dado'; cls='mid'; }
+    const disp = m.val==null ? '—' : (m.fmt?m.fmt(m.val):m.val);
+    const unit = (m.val!=null && !m.fmt && m.unit) ? `<span class="u">${m.unit}</span>` : '';
+    mEl.insertAdjacentHTML('beforeend', `
+      <div class="metric">
+        <div class="top"><span class="label">${m.label}</span><span class="tag ${cls}">${tagtxt}</span></div>
+        <div class="val">${disp}${unit}</div>
+        <div class="ref">${m.ref}</div>
+      </div>`);
+  });
+
+  const score = total? Math.round((goodCount/total)*100) : 0;
+  const sNum=document.getElementById('scoreNum'); sNum.textContent=score;
+  sNum.style.color = score>=70?'var(--signal)':score>=45?'var(--amber)':'var(--warn)';
+  document.getElementById('scoreDesc').textContent =
+    score>=70?'Boa mecânica geral. Ajustes finos podem render ainda mais.' :
+    score>=45?'Base razoável com pontos claros a corrigir.' :
+    'Vários pontos a trabalhar — priorize os alertas abaixo.';
+
+  // findings
+  const fList=document.getElementById('findingsList'); fList.innerHTML='';
+  const findings=[];
+  if(cadence && cadence<165) findings.push(['warn','Cadência baixa','<b>Passos mais curtos e frequentes.</b><span class="cue">Reduz impacto e overstride. Meta: subir ~5% por vez.</span>']);
+  else if(cadence) findings.push(['good','Cadência adequada','<b>Ritmo de passada dentro da faixa eficiente.</b>']);
+  if(overMax>45) findings.push(['warn','Overstride elevado','<b>Pé aterrissa muito à frente do quadril.</b><span class="cue">Foque em aterrissar sob o corpo — aumentar a cadência ajuda.</span>']);
+  else if(overMax<=25) findings.push(['good','Aterrissagem sob o corpo','<b>Pé toca próximo à projeção do quadril.</b>']);
+  if(trunkAvg>18) findings.push(['warn','Tronco muito inclinado','<b>Inclinação excessiva à frente.</b><span class="cue">Incline a partir do tornozelo, não dobrando a cintura.</span>']);
+  else if(trunkAvg<3) findings.push(['mid','Tronco muito ereto','<b>Pouca inclinação frontal.</b><span class="cue">Leve inclinação ajuda a economizar energia.</span>']);
+  if(kneePeak<60) findings.push(['mid','Pouca recuperação de joelho','<b>Flexão baixa na fase de balanço.</b><span class="cue">Trabalho de mobilidade e força de flexores de quadril.</span>']);
+  if(!findings.length) findings.push(['good','Sem alertas críticos','<b>Nenhum desvio grave detectado neste vídeo.</b>']);
+
+  findings.forEach(([cls,ttl,txt])=>{
+    const icon = cls==='good'?'✓':cls==='warn'?'!':'~';
+    fList.insertAdjacentHTML('beforeend', `
+      <div class="finding">
+        <div class="fi ${cls}">${icon}</div>
+        <div class="ftext"><b>${ttl}</b><br>${txt}</div>
+      </div>`);
+  });
+
+  // aviso de qualidade
+  if(data.detected/Math.max(1,data.frames) < 0.5){
+    fList.insertAdjacentHTML('afterbegin', `
+      <div class="finding"><div class="fi mid">i</div>
+      <div class="ftext"><b>Qualidade de rastreamento baixa</b><br>
+      <span class="cue">O corpo foi detectado em poucos quadros. Refilme de perfil, com corpo inteiro e boa luz para um laudo mais confiável.</span></div></div>`);
+  }
+}
+
+document.getElementById('againBtn').addEventListener('click', ()=>{ fileInput.value=''; show('upload'); });
+document.getElementById('shareBtn').addEventListener('click', async ()=>{
+  const txt = `Laudo da passada — Índice técnico ${document.getElementById('scoreNum').textContent}/100. Análise de corrida gerada no app Passada.`;
+  if(navigator.share){ try{ await navigator.share({title:'Laudo da passada', text:txt}); }catch(e){} }
+  else { alert('No app final, este botão gera um PDF/imagem do laudo para enviar ao aluno.'); }
+});
+</script>
+</body>
+</html>
