@@ -218,22 +218,29 @@ function angle(a,b,c){ const ab={x:a.x-b.x,y:a.y-b.y},cb={x:c.x-b.x,y:c.y-b.y};
   const d=ab.x*cb.x+ab.y*cb.y, m=Math.hypot(ab.x,ab.y)*Math.hypot(cb.x,cb.y);
   return m===0?0:Math.acos(Math.max(-1,Math.min(1,d/m)))*180/Math.PI; }
 
+// ---- parâmetros de extração (ENGENHARIA_VISAO §2,§3,§4) ----
+const SAMPLE_FPS = 30;  // amostragem quadro a quadro (era ~12). §3. Se o celular travar, baixar p/ 24.
+const MAX_W = 960;      // largura de trabalho alvo ~960×540 (era 640). §4.
+// Modelo: 'full' hoje. 'heavy' é o próximo passo de avaliação (§2): mais preciso, porém ~2–3× mais
+// pesado por inferência — só trocar depois de medir se o celular aguenta 30fps + 960px + heavy juntos.
+const MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task";
+
 async function loadModel(){
   await ensureVision();
   const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
   poseLandmarker = await PoseLandmarker.createFromOptions(vision,{
-    baseOptions:{ modelAssetPath:"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task", delegate:"GPU" },
+    baseOptions:{ modelAssetPath:MODEL_URL, delegate:"GPU" },
     runningMode:"VIDEO", numPoses:1, minPoseDetectionConfidence:0.5, minTrackingConfidence:0.5 });
 }
 
-// coletores
+// coletores — guardamos os landmarks CRUS por frame; suavização e detecção de eventos
+// acontecem só depois de coletar tudo (ENGENHARIA_VISAO §5: limpar sinal antes de detectar).
 let data;
-function resetData(){ data = { knee:[], trunk:[], over:[], strikes:[], footY:[], frames:0, detected:0 }; }
+function resetData(){ data = { frames:[], total:0, detected:0 }; }
 
 // canvas de trabalho: vídeo é reduzido pra cá antes de rodar a pose (evita travar em 4K)
 const work = document.createElement('canvas');
 const wctx = work.getContext('2d', { willReadFrequently:true });
-const MAX_W = 640; // largura de trabalho — leve o suficiente pro navegador
 
 fileInput.addEventListener('change', async (e)=>{
   const file = e.target.files[0]; if(!file) return;
@@ -266,7 +273,7 @@ fileInput.addEventListener('change', async (e)=>{
     analysisView.style.display='block'; ring.style.display='none';
     procTitle.textContent='Analisando a passada'; procSub.textContent='rastreando articulações quadro a quadro';
     await analyzeVideo();
-    if(data.frames === 0) throw new Error('EMPTY');
+    if(data.frames.length === 0) throw new Error('EMPTY');
     buildReport();
     show('report');
   } catch(err){
@@ -296,7 +303,7 @@ function analyzeVideo(){
   return new Promise((resolve, reject)=>{
     video.pause(); video.currentTime=0;
     const dur = video.duration || 8;
-    const step = 1/12; // ~12fps de amostragem (mais leve)
+    const step = 1/SAMPLE_FPS; // amostragem (ENGENHARIA_VISAO §3)
     let t = 0;
     let watchdog;
     function done(){ clearTimeout(watchdog); resolve(); }
@@ -311,8 +318,8 @@ function analyzeVideo(){
         // exibição: mesmo frame reduzido + esqueleto
         ctx.clearRect(0,0,canvas.width,canvas.height);
         ctx.drawImage(work, 0, 0, canvas.width, canvas.height);
-        data.frames++;
-        if(res.landmarks && res.landmarks.length){ data.detected++; const lm=res.landmarks[0]; drawSkeleton(lm); collect(lm,t*1000); }
+        data.total++;
+        if(res.landmarks && res.landmarks.length){ data.detected++; const lm=res.landmarks[0]; drawSkeleton(lm); collect(lm, video.currentTime*1000); }
       } catch(inner){ console.warn('frame falhou', inner); }
       procBar.style.width = Math.min(95, 20 + (t/dur)*75) + '%';
       t += step; seekNext();
@@ -332,36 +339,114 @@ function drawSkeleton(lm){
     ctx.fillStyle=key?'#ffb454':'#6ee7a8'; ctx.fill(); } });
 }
 
+// Só acumula os landmarks crus deste frame. NADA de ângulo/evento aqui —
+// isso vem depois, sobre o sinal já suavizado (ver processSeries).
 function collect(lm,tms){
-  const useRight=(lm[LM.R_KNEE].visibility||0)>=(lm[LM.L_KNEE].visibility||0);
-  const hip=lm[useRight?LM.R_HIP:LM.L_HIP], knee=lm[useRight?LM.R_KNEE:LM.L_KNEE],
-        ankle=lm[useRight?LM.R_ANKLE:LM.L_ANKLE], sh=lm[useRight?LM.R_SHOULDER:LM.L_SHOULDER];
-  data.knee.push(180-angle(hip,knee,ankle));
-  const dx=sh.x-hip.x, dy=sh.y-hip.y; data.trunk.push(Math.abs(Math.atan2(dx,-dy)*180/Math.PI));
-  data.over.push(ankle.x-hip.x);
-  data.footY.push({y:ankle.y,t:tms});
-  // detecção de contato (mínimo local do pé)
-  const n=data.footY.length;
-  if(n>=5){ const mid=data.footY[n-3];
-    if(mid.y>data.footY[n-5].y && mid.y>data.footY[n-1].y){
-      const last=data.strikes[data.strikes.length-1];
-      if(!last || (mid.t-last)>180) data.strikes.push(mid.t);
-    } }
+  const P=i=>{ const p=lm[i]; return p?{x:p.x,y:p.y,v:p.visibility||0}:null; };
+  data.frames.push({ t:tms,
+    Lhip:P(LM.L_HIP), Rhip:P(LM.R_HIP), Lknee:P(LM.L_KNEE), Rknee:P(LM.R_KNEE),
+    Lankle:P(LM.L_ANKLE), Rankle:P(LM.R_ANKLE), Lsh:P(LM.L_SHOULDER), Rsh:P(LM.R_SHOULDER) });
 }
 
 function pct(arr,p){ const s=[...arr].sort((a,b)=>a-b); return s[Math.floor(s.length*p)]||0; }
 function mean(arr){ return arr.length? arr.reduce((a,b)=>a+b,0)/arr.length : 0; }
+function median(a){ if(!a.length) return null; const s=[...a].sort((x,y)=>x-y); const m=s.length>>1;
+  return s.length%2? s[m] : (s[m-1]+s[m])/2; }
+
+// Média móvel de 5 pontos (ENGENHARIA_VISAO §5) — reduz o jitter das coordenadas ANTES
+// de procurar picos/eventos. Ignora buracos (null) e encolhe a janela nas bordas.
+function smooth(arr,w=5){
+  const half=Math.floor(w/2), out=new Array(arr.length);
+  for(let i=0;i<arr.length;i++){
+    let s=0,c=0;
+    for(let j=i-half;j<=i+half;j++){ const v=arr[j]; if(j>=0&&j<arr.length&&v!=null&&!Number.isNaN(v)){ s+=v; c++; } }
+    out[i]= c? s/c : arr[i];
+  }
+  return out;
+}
+
+// Método A (ESPEC. MÉTRICA 6): detecta contatos pelo pico de EXTENSÃO da perna
+// (ângulo interior quadril-joelho-tornozelo, ~180° na extensão). Não usa o pé → imune à oclusão.
+// A perna atinge extensão máxima nas DUAS transições (pouso e decolagem). Diferenciamos:
+//   foot strike = pico precedido por flexão PROFUNDA (fim do balanço);
+//   toe-off     = pico precedido por flexão SUAVE (fase de apoio) → descartado.
+// Roda por UMA perna; a cadência soma as duas (resolve o "conta pela metade").
+function legStrikes(ang, times){
+  const n=ang.length; if(n<6) return [];
+  const maxA=Math.max(...ang), minA=Math.min(...ang), range=Math.max(1,maxA-minA);
+  const thr=0.9*maxA; // limiar dinâmico = 90% da extensão máxima deste vídeo
+  let peaks=[];
+  for(let i=1;i<n-1;i++){ if(ang[i]>=thr && ang[i]>=ang[i-1] && ang[i]>=ang[i+1]) peaks.push(i); }
+  // funde picos colados (jitter residual) mantendo o maior — refratário ~130ms
+  const merged=[];
+  for(const idx of peaks){
+    const last=merged[merged.length-1];
+    if(last!=null && times[idx]-times[last] < 130){ if(ang[idx]>ang[last]) merged[merged.length-1]=idx; }
+    else merged.push(idx);
+  }
+  // classifica cada pico pela profundidade da flexão que o precede
+  const strikes=[];
+  for(let p=0;p<merged.length;p++){
+    const idx=merged[p], from = p===0?0:merged[p-1];
+    let dip=Infinity; for(let i=from;i<=idx;i++) dip=Math.min(dip,ang[i]);
+    if(ang[idx]-dip >= 0.35*range) strikes.push(times[idx]); // flexão profunda → contato inicial
+  }
+  // descarta contatos implausivelmente próximos (>240 spm por perna = ruído)
+  const out=[]; for(const t of strikes){ if(!out.length || t-out[out.length-1] > 250) out.push(t); }
+  return out;
+}
+
+// Suaviza coordenadas, recalcula ângulos e deriva as métricas do vídeo inteiro.
+function processSeries(){
+  const F=data.frames;
+  const K=['Lhip','Rhip','Lknee','Rknee','Lankle','Rankle','Lsh','Rsh'];
+  const X={},Y={};
+  K.forEach(k=>{ X[k]=smooth(F.map(f=>f[k]?f[k].x:null)); Y[k]=smooth(F.map(f=>f[k]?f[k].y:null)); });
+  const pt=(k,i)=>({x:X[k][i],y:Y[k][i]});
+  const times=F.map(f=>f.t);
+
+  // ângulo interior (extensão) de cada perna, já sobre o sinal suavizado
+  const angL=F.map((f,i)=>angle(pt('Lhip',i),pt('Lknee',i),pt('Lankle',i)));
+  const angR=F.map((f,i)=>angle(pt('Rhip',i),pt('Rknee',i),pt('Rankle',i)));
+
+  // CADÊNCIA — Método A, os DOIS lados somados (ESPEC. MÉTRICA 6)
+  const strikes=[...legStrikes(angL,times),...legStrikes(angR,times)].sort((a,b)=>a-b);
+  let cadence=null;
+  if(strikes.length>=4){
+    const iv=[]; for(let i=1;i<strikes.length;i++) iv.push(strikes[i]-strikes[i-1]);
+    const good=iv.filter(d=>d>=170 && d<=650); // intervalo de PASSO plausível (~92–353 spm)
+    const med=median(good);
+    if(med){ const c=Math.round(60000/med); if(c>=120 && c<=240) cadence=c; }
+  }
+
+  // lado dominante (maior visibilidade acumulada) p/ as métricas de um lado só
+  let vR=0,vL=0; F.forEach(f=>{ vR+=(f.Rhip?.v||0)+(f.Rknee?.v||0)+(f.Rankle?.v||0);
+                                vL+=(f.Lhip?.v||0)+(f.Lknee?.v||0)+(f.Lankle?.v||0); });
+  const R=vR>=vL;
+  const hipK=R?'Rhip':'Lhip', kneeK=R?'Rknee':'Lknee', ankK=R?'Rankle':'Lankle', shK=R?'Rsh':'Lsh';
+
+  const kneeFlex=F.map((f,i)=>180-angle(pt(hipK,i),pt(kneeK,i),pt(ankK,i)));
+  const trunk=F.map((f,i)=>{ const dx=X[shK][i]-X[hipK][i], dy=Y[shK][i]-Y[hipK][i];
+    return Math.abs(Math.atan2(dx,-dy)*180/Math.PI); });
+  const over=F.map((f,i)=>X[ankK][i]-X[hipK][i]);
+
+  return {
+    cadence,
+    kneePeak: Math.round(pct(kneeFlex,0.9)),
+    trunkAvg: Math.round(mean(trunk)),
+    overMax:  Math.round(Math.max(...over.map(Math.abs))*300),
+    nStrikes: strikes.length
+  };
+}
 
 function buildReport(){
   document.getElementById('repDate').textContent = new Date().toLocaleDateString('pt-BR',{day:'2-digit',month:'short',year:'numeric'});
 
-  const kneePeak = Math.round(pct(data.knee,0.9));
-  const trunkAvg = Math.round(mean(data.trunk));
-  const overMax = Math.round(Math.max(...data.over.map(Math.abs))*300);
-
-  let cadence=null;
-  if(data.strikes.length>=3){ const sp=[]; for(let i=1;i<data.strikes.length;i++) sp.push(data.strikes[i]-data.strikes[i-1]);
-    const a=mean(sp); if(a>150&&a<800) cadence=Math.round(60000/a); }
+  const S = processSeries();
+  const kneePeak = S.kneePeak;
+  const trunkAvg = S.trunkAvg;
+  const overMax  = S.overMax;
+  const cadence  = S.cadence;
 
   const metrics = [
     { label:'Cadência', val:cadence, unit:'ppm', ref:'ideal 170–185', good:[170,185], mid:[160,195], fmt:v=>v?v:'—' },
@@ -418,7 +503,7 @@ function buildReport(){
   });
 
   // aviso de qualidade
-  if(data.detected/Math.max(1,data.frames) < 0.5){
+  if(data.detected/Math.max(1,data.total) < 0.5){
     fList.insertAdjacentHTML('afterbegin', `
       <div class="finding"><div class="fi mid">i</div>
       <div class="ftext"><b>Qualidade de rastreamento baixa</b><br>

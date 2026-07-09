@@ -1,0 +1,22 @@
+# Documentos internos (estratégia de negócio + base científica) — NÃO publicar no repo público
+CLAUDE.md
+ROADMAP.md
+ESPECIFICACAO_TECNICA.md
+ENGENHARIA_VISAO.md
+LOGICA_LAUDO.md
+PROTOCOLO_CAPTURA.md
+
+# Vídeos de teste (privacidade do atleta + peso)
+Videos teste/
+*.mp4
+*.mov
+*.avi
+*.webm
+*.m4v
+
+# Ferramentas / config local
+.claude/
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
