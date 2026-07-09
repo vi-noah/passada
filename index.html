@@ -77,6 +77,7 @@
   .metric .tag.good { color:var(--signal); background:rgba(110,231,168,0.12); }
   .metric .tag.mid { color:var(--amber); background:rgba(255,180,84,0.12); }
   .metric .tag.warn { color:var(--warn); background:rgba(255,107,94,0.12); }
+  .metric .tag.exp { color:var(--mute); background:rgba(109,125,120,0.14); }
   .metric .val { font-family:var(--mono); font-size:26px; font-weight:600; letter-spacing:-0.02em; }
   .metric .val .u { font-size:12px; color:var(--mute); font-weight:400; }
   .metric .ref { font-size:10px; color:var(--mute); margin-top:4px; }
@@ -89,6 +90,7 @@
   .finding .fi.good { background:rgba(110,231,168,0.12); color:var(--signal); }
   .finding .fi.warn { background:rgba(255,107,94,0.12); color:var(--warn); }
   .finding .fi.mid { background:rgba(255,180,84,0.12); color:var(--amber); }
+  .finding .fi.exp { background:rgba(109,125,120,0.14); color:var(--mute); }
   .finding .ftext { font-size:13px; line-height:1.5; }
   .finding .ftext b { font-weight:600; }
   .finding .ftext .cue { color:var(--mute); display:block; margin-top:2px; }
@@ -384,15 +386,15 @@ function legStrikes(ang, times){
     if(last!=null && times[idx]-times[last] < 130){ if(ang[idx]>ang[last]) merged[merged.length-1]=idx; }
     else merged.push(idx);
   }
-  // classifica cada pico pela profundidade da flexão que o precede
+  // classifica cada pico pela profundidade da flexão que o precede; retorna ÍNDICES dos contatos
   const strikes=[];
   for(let p=0;p<merged.length;p++){
     const idx=merged[p], from = p===0?0:merged[p-1];
     let dip=Infinity; for(let i=from;i<=idx;i++) dip=Math.min(dip,ang[i]);
-    if(ang[idx]-dip >= 0.35*range) strikes.push(times[idx]); // flexão profunda → contato inicial
+    if(ang[idx]-dip >= 0.35*range) strikes.push(idx); // flexão profunda → contato inicial
   }
   // descarta contatos implausivelmente próximos (>240 spm por perna = ruído)
-  const out=[]; for(const t of strikes){ if(!out.length || t-out[out.length-1] > 250) out.push(t); }
+  const out=[]; for(const idx of strikes){ if(!out.length || times[idx]-times[out[out.length-1]] > 250) out.push(idx); }
   return out;
 }
 
@@ -409,17 +411,20 @@ function processSeries(){
   const angL=F.map((f,i)=>angle(pt('Lhip',i),pt('Lknee',i),pt('Lankle',i)));
   const angR=F.map((f,i)=>angle(pt('Rhip',i),pt('Rknee',i),pt('Rankle',i)));
 
-  // CADÊNCIA — Método A, os DOIS lados somados (ESPEC. MÉTRICA 6)
-  const strikes=[...legStrikes(angL,times),...legStrikes(angR,times)].sort((a,b)=>a-b);
+  // contatos (índices) por perna — Método A
+  const idxL=legStrikes(angL,times), idxR=legStrikes(angR,times);
+
+  // CADÊNCIA — os DOIS lados somados (ESPEC. MÉTRICA 6)
+  const strikeT=[...idxL,...idxR].map(i=>times[i]).sort((a,b)=>a-b);
   let cadence=null;
-  if(strikes.length>=4){
-    const iv=[]; for(let i=1;i<strikes.length;i++) iv.push(strikes[i]-strikes[i-1]);
+  if(strikeT.length>=4){
+    const iv=[]; for(let i=1;i<strikeT.length;i++) iv.push(strikeT[i]-strikeT[i-1]);
     const good=iv.filter(d=>d>=170 && d<=650); // intervalo de PASSO plausível (~92–353 spm)
     const med=median(good);
     if(med){ const c=Math.round(60000/med); if(c>=120 && c<=240) cadence=c; }
   }
 
-  // lado dominante (maior visibilidade acumulada) p/ as métricas de um lado só
+  // lado dominante (maior visibilidade acumulada) = perna PRÓXIMA da câmera (§1: a distante oclui)
   let vR=0,vL=0; F.forEach(f=>{ vR+=(f.Rhip?.v||0)+(f.Rknee?.v||0)+(f.Rankle?.v||0);
                                 vL+=(f.Lhip?.v||0)+(f.Lknee?.v||0)+(f.Lankle?.v||0); });
   const R=vR>=vL;
@@ -428,14 +433,25 @@ function processSeries(){
   const kneeFlex=F.map((f,i)=>180-angle(pt(hipK,i),pt(kneeK,i),pt(ankK,i)));
   const trunk=F.map((f,i)=>{ const dx=X[shK][i]-X[hipK][i], dy=Y[shK][i]-Y[hipK][i];
     return Math.abs(Math.atan2(dx,-dy)*180/Math.PI); });
-  const over=F.map((f,i)=>X[ankK][i]-X[hipK][i]);
+
+  // OVERSTRIDE — medido no INSTANTE do contato da perna próxima da câmera (ESPEC. MÉTRICA 4):
+  // distância horizontal entre o pé e o centro do quadril, normalizada pelo comprimento da perna.
+  // (Antes era a MÉDIA do vídeo × 300 — um chute. Agora é medição no frame certo.)
+  const strideIdx = R?idxR:idxL;
+  const ov=[];
+  for(const i of strideIdx){
+    const comx=(X['Lhip'][i]+X['Rhip'][i])/2, footx=X[ankK][i];
+    const legLen=Math.hypot(X[hipK][i]-X[ankK][i], Y[hipK][i]-Y[ankK][i]);
+    if(legLen>0.02) ov.push(Math.abs(footx-comx)/legLen);
+  }
+  const overRatio = ov.length? median(ov) : null;
 
   return {
     cadence,
     kneePeak: Math.round(pct(kneeFlex,0.9)),
     trunkAvg: Math.round(mean(trunk)),
-    overMax:  Math.round(Math.max(...over.map(Math.abs))*300),
-    nStrikes: strikes.length
+    overPct:  overRatio==null? null : Math.round(overRatio*100),
+    nStrikes: strikeT.length
   };
 }
 
@@ -445,24 +461,29 @@ function buildReport(){
   const S = processSeries();
   const kneePeak = S.kneePeak;
   const trunkAvg = S.trunkAvg;
-  const overMax  = S.overMax;
+  const overPct  = S.overPct;
   const cadence  = S.cadence;
 
   const metrics = [
-    { label:'Cadência', val:cadence, unit:'ppm', ref:'ideal 170–185', good:[170,185], mid:[160,195], fmt:v=>v?v:'—' },
-    { label:'Flexão joelho', val:kneePeak, unit:'°', ref:'recuperação 80–110°', good:[80,110], mid:[60,130] },
-    { label:'Inclinação tronco', val:trunkAvg, unit:'°', ref:'ideal 5–12°', good:[5,12], mid:[0,18] },
-    { label:'Overstride', val:overMax, unit:'', ref:'quanto menor, melhor', good:[0,25], mid:[26,45], fmt:v=> v<=25?'Baixo':v<=45?'Médio':'Alto' },
+    { label:'Cadência', val:cadence, unit:'ppm', ref:'ideal 170–185', good:[170,185], mid:[160,195], fmt:v=>v?v:'—', scored:true },
+    { label:'Flexão joelho', val:kneePeak, unit:'°', ref:'recuperação 80–110°', good:[80,110], mid:[60,130], scored:true },
+    { label:'Inclinação tronco', val:trunkAvg, unit:'°', ref:'ideal 5–12°', good:[5,12], mid:[0,18], scored:true },
+    // Overstride: agora medido de verdade (no contato, normalizado), mas SEM faixa validada →
+    // fora da nota, marcado "experimental" (ROADMAP passo 2). Menor = melhor.
+    { label:'Overstride', val:overPct, unit:'%', ref:'% do compr. da perna · no contato', experimental:true },
   ];
 
   const mEl = document.getElementById('repMetrics'); mEl.innerHTML='';
   let goodCount=0, total=0;
   metrics.forEach(m=>{
-    let cls='warn', tagtxt='atenção';
-    if(m.val!=null){ total++;
+    let cls, tagtxt;
+    if(m.experimental){ cls='exp'; tagtxt='experimental'; }        // não pesa no índice
+    else if(m.val==null){ cls='mid'; tagtxt='s/ dado'; }
+    else { total++;
       if(m.val>=m.good[0]&&m.val<=m.good[1]){ cls='good'; tagtxt='bom'; goodCount++; }
       else if(m.val>=m.mid[0]&&m.val<=m.mid[1]){ cls='mid'; tagtxt='médio'; }
-    } else { tagtxt='s/ dado'; cls='mid'; }
+      else { cls='warn'; tagtxt='atenção'; }
+    }
     const disp = m.val==null ? '—' : (m.fmt?m.fmt(m.val):m.val);
     const unit = (m.val!=null && !m.fmt && m.unit) ? `<span class="u">${m.unit}</span>` : '';
     mEl.insertAdjacentHTML('beforeend', `
@@ -486,15 +507,14 @@ function buildReport(){
   const findings=[];
   if(cadence && cadence<165) findings.push(['warn','Cadência baixa','<b>Passos mais curtos e frequentes.</b><span class="cue">Reduz impacto e overstride. Meta: subir ~5% por vez.</span>']);
   else if(cadence) findings.push(['good','Cadência adequada','<b>Ritmo de passada dentro da faixa eficiente.</b>']);
-  if(overMax>45) findings.push(['warn','Overstride elevado','<b>Pé aterrissa muito à frente do quadril.</b><span class="cue">Foque em aterrissar sob o corpo — aumentar a cadência ajuda.</span>']);
-  else if(overMax<=25) findings.push(['good','Aterrissagem sob o corpo','<b>Pé toca próximo à projeção do quadril.</b>']);
+  if(overPct!=null) findings.push(['exp','Overstride (experimental)',`<b>No contato, o pé aterrissa a ~${overPct}% do comprimento da perna à frente do quadril.</b><span class="cue">Métrica nova, ainda sem faixa validada — por isso não entra na nota. Menor é melhor; subir a cadência tende a reduzir.</span>`]);
   if(trunkAvg>18) findings.push(['warn','Tronco muito inclinado','<b>Inclinação excessiva à frente.</b><span class="cue">Incline a partir do tornozelo, não dobrando a cintura.</span>']);
   else if(trunkAvg<3) findings.push(['mid','Tronco muito ereto','<b>Pouca inclinação frontal.</b><span class="cue">Leve inclinação ajuda a economizar energia.</span>']);
   if(kneePeak<60) findings.push(['mid','Pouca recuperação de joelho','<b>Flexão baixa na fase de balanço.</b><span class="cue">Trabalho de mobilidade e força de flexores de quadril.</span>']);
   if(!findings.length) findings.push(['good','Sem alertas críticos','<b>Nenhum desvio grave detectado neste vídeo.</b>']);
 
   findings.forEach(([cls,ttl,txt])=>{
-    const icon = cls==='good'?'✓':cls==='warn'?'!':'~';
+    const icon = cls==='good'?'✓':cls==='warn'?'!':cls==='exp'?'i':'~';
     fList.insertAdjacentHTML('beforeend', `
       <div class="finding">
         <div class="fi ${cls}">${icon}</div>
